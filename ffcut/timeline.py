@@ -56,7 +56,7 @@ from __future__ import annotations
 import bisect
 import math
 import os
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from collections.abc import Iterable
 from typing import NamedTuple
 
@@ -451,6 +451,24 @@ class CutList:
 
     def _invalidate(self) -> None:
         self._keeps = None
+
+    def to_dict(self) -> dict:
+        """Duration, cuts and holes as plain JSON values (a saved project)."""
+        return {
+            "duration": self._duration,
+            "cuts": [list(r) for r in self._cuts],
+            "holes": {str(k): [list(r) for r in v] for k, v in self._copy_holes().items()},
+        }
+
+    def load_dict(self, data: dict) -> None:
+        """A saved project's cuts and holes, with an empty history."""
+        self.reset(float(data.get("duration", 0.0)))
+        self._cuts = sorted((float(a), float(b)) for a, b in data.get("cuts", []))
+        self._holes = {
+            int(k): sorted((float(a), float(b)) for a, b in v)
+            for k, v in (data.get("holes") or {}).items()
+        }
+        self._invalidate()
 
     def _copy_holes(self) -> dict[int, list[Range]]:
         return {lane: list(ranges) for lane, ranges in self._holes.items() if ranges}
@@ -858,6 +876,19 @@ class Clip:
             self.fade_in, self.fade_out,
         )
         clip.title = self.title
+        return clip
+
+    def to_dict(self) -> dict:
+        data = {name: getattr(self, name) for name in self.__slots__ if name != "title"}
+        data["title"] = asdict(self.title) if self.title is not None else None
+        return data
+
+    @staticmethod
+    def from_dict(data: dict) -> Clip:
+        fields = {k: v for k, v in data.items() if k in Clip.__slots__ and k != "title"}
+        clip = Clip(**fields)
+        if data.get("title"):
+            clip.title = Title(**data["title"])
         return clip
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
@@ -1549,6 +1580,40 @@ class TimelineWidget(QWidget):
             self.model.push_state(self._ui_state())
         clip.title = replace(clip.title, **changes)  # type: ignore[arg-type]
         self.update()
+        self.cutsChanged.emit()
+
+    def project_state(self, *, with_view: bool = True) -> dict:
+        """Everything a saved project restores, as plain JSON values."""
+        state = {
+            "model": self.model.to_dict(),
+            "lanes": [
+                {**{k: v for k, v in lane.snapshot().items() if k != "clips"},
+                 "clips": [c.to_dict() for c in lane.clips]}
+                for lane in self._lanes
+            ],
+        }
+        if with_view:
+            state["playhead"] = self._playhead
+            state["view"] = list(self._view)
+        return state
+
+    def load_project_state(self, state: dict) -> None:
+        """Replace the edit with a saved one (media already set).  No undo step:
+        the history starts at the loaded project, as it does after an open."""
+        self.model.load_dict(state["model"])
+        lanes = state["lanes"]
+        self._restore_lanes(
+            [{**lane, "clips": [Clip.from_dict(c) for c in lane["clips"]]} for lane in lanes]
+        )
+        for lane, saved in zip(self._lanes, lanes):  # the saved mix, not the current one
+            lane.muted, lane.gain_db = bool(saved["muted"]), float(saved["gain_db"])
+            if lane.header is not None:
+                lane.header.mute.setChecked(lane.muted)
+                lane.header.slider.setValue(int(lane.gain_db))
+        self._playhead = float(state.get("playhead", 0.0))
+        self._after_model_change()
+        if state.get("view"):
+            self._set_view(*state["view"])
         self.cutsChanged.emit()
 
     def push_undo(self) -> None:

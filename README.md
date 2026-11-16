@@ -27,26 +27,33 @@ backend, and `ffmpeg`/`ffprobe` on `PATH`. Nothing from pip.
    Recent remembers the last eight. File ▸ Import… (Ctrl+I) *adds* a file
    instead: a video goes on the end of video track 1 (its sound grouped to it),
    an audio file gets a lane of its own at 0:00. Opening another file over an
-   edit asks before it throws the edit away.
-2. **Scrub** — drag the playhead, or click anywhere on the timeline. The
+   unsaved edit offers to save it first.
+2. **Projects** — File ▸ Save Project (Ctrl+Shift+S; Ctrl+S stays Cut) / Save
+   Project As… writes a `.ffcut` file: every track, block (position, trims,
+   groups, fades, text), cut, lift, the mix, the playhead and the view. Open it
+   with File ▸ Open Project… (Ctrl+Shift+O), File ▸ Open, Recent, a drop, or
+   `./ffcut-gui edit.ffcut`. It stores absolute paths to the media, so moving
+   the files breaks it; a missing video refuses to open, other missing files
+   are listed. Undo history is not saved.
+3. **Scrub** — drag the playhead, or click anywhere on the timeline. The
    transport's outer buttons jump cut-to-cut; the inner ones skip by the
    interval set in Preferences (default 5 s).
-3. **Select** — click-drag on the timeline, or Mark In / Mark Out (I / O) at the
+4. **Select** — click-drag on the timeline, or Mark In / Mark Out (I / O) at the
    playhead. Setting one never clears the other, and a plain click never clears
    the selection. Double-click resets the selection to whatever is under the
    cursor: over a block it selects that block (and its group) and marks the
    section of it you clicked; over a gap or an empty lane it marks the segment
    under the cursor, as it always did.
-4. **Cut** — Delete or Ctrl+S removes the selection; the timeline closes the gap
+5. **Cut** — Delete or Ctrl+S removes the selection; the timeline closes the gap
    and leaves a thin splice marker where the cut was. Ctrl+Z / Ctrl+Shift+Z.
-5. **Audio** — every audio track gets its own waveform lane with an **M** mute
+6. **Audio** — every audio track gets its own waveform lane with an **M** mute
    toggle and a −30…+12 dB gain slider. That is the render mix *and* the preview
    mix: muted tracks are left out of `amix` entirely and go silent in the
    player, gains become per-track `volume` filters and per-player volumes. The
    slider by the Render button is the master over that mix. (A boost above 0 dB
    previews as balance, not level: Qt cannot play louder than unity, so the
    other lanes come down instead.)
-6. **More tracks** — drop an audio file anywhere (the preview included) and it
+7. **More tracks** — drop an audio file anywhere (the preview included) and it
    gets a lane of its own; drop it on an empty lane to place it at 0:00, on a
    lane with content to append it at the end. Drop a **video** and its embedded
    audio comes with it, one lane per track, grouped to the picture. Right-click
@@ -55,7 +62,7 @@ backend, and `ffmpeg`/`ffprobe` on `PATH`. Nothing from pip.
    through wherever the first has a lift hole or has run out. The edit runs to
    the end of the longest lane; the render pads the video with black and short
    audio with silence to match.
-7. **Blocks** — every clip on a lane is a block you can move, like an event in
+8. **Blocks** — every clip on a lane is a block you can move, like an event in
    Vegas.
 
    | | |
@@ -92,7 +99,7 @@ backend, and `ffmpeg`/`ffprobe` on `PATH`. Nothing from pip.
    **not** play fades — Qt cannot ramp the picture and the preview mix is Qt
    volumes, not an ffmpeg graph — so the wedge on the strip is what tells you one
    is there.
-8. **Text** — Edit ▸ Add Text… (Ctrl+T) puts a text block at the playhead on a
+9. **Text** — Edit ▸ Add Text… (Ctrl+T) puts a text block at the playhead on a
    video track of its own (5 s; Alt+drag its edges to stretch it, Alt+drag it
    to move it, S to split it, right-click ▸ Edit text…). The text dialog sets
    the words, font, bold, colour, size and fade in/out (the block's corner
@@ -105,12 +112,12 @@ backend, and `ffmpeg`/`ffprobe` on `PATH`. Nothing from pip.
    (Qt's video widget is a native window nothing can be painted over); the
    render always has it. Fades ramp the text's opacity (`drawtext` `alpha`),
    and the paused preview shows that opacity at the playhead.
-9. **Lift vs ripple** — with every lane armed (the default) Delete ripples the
+10. **Lift vs ripple** — with every lane armed (the default) Delete ripples the
    whole edit. Click a lane header to arm that lane alone, Ctrl+click to add or
    remove one, drag inside an unarmed lane to re-arm to it; Delete then *lifts*
    the range from those lanes only (black / silence) and the timeline keeps its
    length so the lanes stay in sync. `A` arms everything again.
-10. **Render** — Render ▸ Render Full… (Ctrl+R) renders the whole edit. Render ▸
+11. **Render** — Render ▸ Render Full… (Ctrl+R) renders the whole edit. Render ▸
    Render Selection… (Ctrl+Shift+R) is enabled only when a selection exists and
    renders just that range, with any cuts inside it still honoured.
 
@@ -231,6 +238,7 @@ for interpreter teardown is how a green run ends in a segfault.
 | --- | --- |
 | Ctrl+O | open a file |
 | Ctrl+I | import a file into the edit |
+| Ctrl+Shift+S / Ctrl+Shift+O | save / open a project |
 | Ctrl+T | add text at the playhead |
 | Space | play / pause |
 | ← → | nudge playhead (Shift finer, Ctrl coarser) |

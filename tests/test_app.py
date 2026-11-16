@@ -2266,5 +2266,69 @@ class TestText(_OwnConfig, WindowCase):
         win._set_playing(False)
 
 
+class TestProjects(_OwnConfig, WindowCase):
+    def save_dialog(self, path: Path) -> None:
+        orig = QFileDialog.getSaveFileName
+        QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (str(path), ""))  # type: ignore[method-assign]
+        self.addCleanup(setattr, QFileDialog, "getSaveFileName", orig)
+
+    def wait_info(self, win: appmod.MainWindow) -> None:
+        deadline = time.monotonic() + 3.0
+        while (win.info is None or win._pending_project) and time.monotonic() < deadline:
+            pump(0.02)
+        pump(0.05)
+
+    def test_save_and_reopen_restores_the_edit(self) -> None:
+        win = self.loaded()
+        cut_source(win.timeline, 100.0, 900.0)
+        win.timeline.add_title(50.0, "Kept")
+        path = Path(tempfile.mkdtemp(dir=_TMP.name)) / "edit"  # no suffix typed
+        self.save_dialog(path)
+        self.assertTrue(win.save_project())
+        saved = path.with_name("edit.ffcut")
+        self.assertTrue(saved.is_file(), "the .ffcut suffix is added")
+        self.assertEqual(json.loads(saved.read_text())["media"], win.info.path)  # type: ignore[union-attr]
+
+        other = self.window()
+        other.load_file(str(saved))  # what File > Recent, a drop and argv all do
+        self.wait_info(other)
+        self.assertEqual(other.timeline.render_plan(), win.timeline.render_plan())
+        self.assertEqual(keeps(other.timeline), keeps(win.timeline))
+        self.assertEqual(other.windowTitle(), "ffcut — edit.ffcut")
+        self.assertIn(str(saved), other.config.recent)
+
+    def test_the_prompt_only_asks_about_unsaved_changes(self) -> None:
+        win = self.loaded()
+        asked: list[object] = []
+        orig = QMessageBox.question
+        answer = [QMessageBox.StandardButton.Cancel]
+        QMessageBox.question = staticmethod(lambda *a, **k: asked.append(a) or answer[0])  # type: ignore[method-assign]
+        self.addCleanup(setattr, QMessageBox, "question", orig)
+        cut_source(win.timeline, 100.0, 900.0)
+        self.save_dialog(Path(tempfile.mkdtemp(dir=_TMP.name)) / "p.ffcut")
+        answer[0] = QMessageBox.StandardButton.Save  # Save from the prompt
+        self.assertTrue(_REAL_DISCARD_OK(win))
+        self.assertEqual(len(asked), 1)
+        self.assertIsNotNone(win._project_path)
+        win.timeline.set_playhead(500.0)
+        self.assertTrue(_REAL_DISCARD_OK(win), "saved and unchanged: no question")
+        self.assertEqual(len(asked), 1)
+        cut_source(win.timeline, 1000.0, 1100.0)
+        answer[0] = QMessageBox.StandardButton.Cancel
+        self.assertFalse(_REAL_DISCARD_OK(win), "an unsaved change asks again")
+        self.assertEqual(len(asked), 2)
+
+    def test_a_project_whose_video_is_gone_is_refused(self) -> None:
+        win = self.loaded()
+        bad = Path(tempfile.mkdtemp(dir=_TMP.name)) / "gone.ffcut"
+        bad.write_text(json.dumps({"ffcut_project": 1, "media": "/nonexistent/x.mp4",
+                                   "timeline": {"model": {}, "lanes": []}}))
+        warned: list[object] = []
+        QMessageBox.warning = staticmethod(lambda *a, **k: warned.append(a))  # type: ignore[method-assign]
+        win.load_file(str(bad))
+        self.assertEqual(len(warned), 1)
+        self.assertEqual(win.info.path, os.path.abspath(__file__), "the open edit is untouched")  # type: ignore[union-attr]
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

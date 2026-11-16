@@ -186,8 +186,11 @@ PREVIEW_QUALITIES: list[tuple[str, str]] = [
 VIDEO_SUFFIXES = {
     ".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".ts", ".mts", ".flv", ".wmv",
 }
+PROJECT_SUFFIX = ".ffcut"
+PROJECT_FILTER = f"ffcut projects (*{PROJECT_SUFFIX});;All files (*)"
 VIDEO_FILTER = (
-    f"Video files ({' '.join('*' + s for s in sorted(VIDEO_SUFFIXES))});;All files (*)"
+    f"Video files ({' '.join('*' + s for s in sorted(VIDEO_SUFFIXES))});;"
+    f"ffcut projects (*{PROJECT_SUFFIX});;All files (*)"
 )
 
 #: Dropping one of these ADDS an audio lane under the existing ones (aligned to
@@ -1808,6 +1811,10 @@ class MainWindow(QMainWindow):
         self.options: RenderOptions = self.config.render
         self.info: MediaInfo | None = None
         self._asset_dir: Path | None = None
+        self._project_path: Path | None = None
+        #: The saved project's edit (no playhead/view), to tell "unsaved" apart.
+        self._saved_state: str | None = None
+        self._pending_project: tuple[int, Path, dict, list[str]] | None = None
         self._proxy_queue: list[str] = []
         self._proxy_busy: str | None = None
         self._proxy_failed: set[str] = set()
@@ -2072,6 +2079,16 @@ class MainWindow(QMainWindow):
             file_menu, "&Import…", self.import_dialog, "Ctrl+I",
             "Add a video to the end of video track 1, or audio on a lane of its own.",
         )
+        file_menu.addSeparator()
+        self._act(file_menu, "Open &Project…", self.open_project_dialog, "Ctrl+Shift+O")
+        self.act_save_project = self._act(
+            file_menu, "&Save Project", self.save_project, "Ctrl+Shift+S",
+            "Save the edit (tracks, blocks, cuts, text, mix) to a .ffcut file. "
+            "Ctrl+S stays Cut.",
+        )
+        self.act_save_project_as = self._act(
+            file_menu, "Save Project &As…", self.save_project_as
+        )
         self.recent_menu = file_menu.addMenu("&Recent")
         assert self.recent_menu is not None
         self._rebuild_recent()
@@ -2226,8 +2243,14 @@ class MainWindow(QMainWindow):
         if not file_path.is_file():
             QMessageBox.warning(self, "ffcut", f"Not a file:\n{file_path}")
             return
+        if file_path.suffix.lower() == PROJECT_SUFFIX:
+            self.open_project(file_path)  # Recent, a drop and the command line too
+            return
         if not self._discard_ok():
             return
+        self._load_media(file_path)
+
+    def _load_media(self, file_path: Path) -> None:
         self.config.last_open_dir = str(file_path.parent)
         self._status(f"Probing {file_path.name}…")
         for widget in (self.render_button, self.act_render_full, self.act_render_sel):
@@ -2246,12 +2269,84 @@ class MainWindow(QMainWindow):
         """Ask before an open or a close throws the edit away (it cannot be undone)."""
         if self.info is None or not self.timeline.can_undo():
             return True
+        if self._saved_state is not None and self._project_snapshot() == self._saved_state:
+            return True  # saved, and nothing changed since
+        buttons = QMessageBox.StandardButton
         reply = QMessageBox.question(
-            self, "ffcut", "Discard the current edit?",
-            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
+            self, "ffcut", "Save the current edit as a project first?",
+            buttons.Save | buttons.Discard | buttons.Cancel, buttons.Cancel,
         )
-        return reply == QMessageBox.StandardButton.Discard
+        if reply == buttons.Save:
+            return self.save_project()
+        return reply == buttons.Discard
+
+    # ---------------------------------------------------------------- projects
+    def _project_snapshot(self) -> str:
+        return json.dumps(self.timeline.project_state(with_view=False), sort_keys=True)
+
+    def open_project_dialog(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open project", self.config.last_save_dir, PROJECT_FILTER
+        )
+        if path:
+            self.load_file(path)
+
+    def open_project(self, path: Path) -> None:
+        """Probe the project's video, then lay its saved edit over it (_on_probed)."""
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            media, state = str(data["media"]), data["timeline"]
+            clips = [c for lane in state["lanes"] for c in lane["clips"]]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            QMessageBox.warning(self, "ffcut", f"Not an ffcut project:\n{path}\n\n{exc}")
+            return
+        if not Path(media).is_file():
+            QMessageBox.warning(self, "ffcut", f"The project's video is missing:\n{media}")
+            return
+        if not self._discard_ok():
+            return
+        missing = sorted({c["path"] for c in clips if c.get("path") and not Path(c["path"]).is_file()})
+        self._load_media(Path(media))
+        self._pending_project = (self._probe_gen, path, state, missing)
+
+    def save_project(self) -> bool:
+        if self.info is None:
+            return False
+        if self._project_path is None:
+            return self.save_project_as()
+        return self._write_project(self._project_path)
+
+    def save_project_as(self) -> bool:
+        if self.info is None:
+            return False
+        suggested = Path(self.config.last_save_dir) / (Path(self.info.path).stem + PROJECT_SUFFIX)
+        chosen, _ = QFileDialog.getSaveFileName(self, "Save project", str(suggested), PROJECT_FILTER)
+        if not chosen:
+            return False
+        path = Path(chosen)
+        if path.suffix.lower() != PROJECT_SUFFIX:
+            path = path.with_name(path.name + PROJECT_SUFFIX)
+        return self._write_project(path)
+
+    def _write_project(self, path: Path) -> bool:
+        assert self.info is not None
+        # shortcut: absolute media paths only; a project moved to another machine needs them re-linked.
+        data = {"ffcut_project": 1, "media": self.info.path, "timeline": self.timeline.project_state()}
+        try:
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
+            os.replace(tmp, path)  # a crash mid-write never leaves half a project
+        except OSError as exc:
+            QMessageBox.critical(self, "ffcut", f"Could not save the project:\n{exc}")
+            return False
+        self._project_path = path
+        self._saved_state = self._project_snapshot()
+        self.config.last_save_dir = str(path.parent)
+        self.config.remember(str(path))
+        self._rebuild_recent()
+        self.setWindowTitle(f"ffcut — {path.name}")
+        self._status(f"Saved {path}", 5000)
+        return True
 
     def _spawn(
         self,
@@ -2283,8 +2378,12 @@ class MainWindow(QMainWindow):
         if gen != self._probe_gen:
             return  # a newer load_file() superseded this one
         self.info = info
-        self.setWindowTitle(f"ffcut — {Path(info.path).name}")
-        self.config.remember(info.path)
+        project = self._pending_project if self._pending_project and self._pending_project[0] == gen else None
+        self._pending_project = None
+        self._project_path = project[1] if project else None
+        self._saved_state = None
+        self.setWindowTitle(f"ffcut — {(project[1] if project else Path(info.path)).name}")
+        self.config.remember(str(project[1]) if project else info.path)
         self._rebuild_recent()
 
         # Asset jobs still running belong to the old file: their results are
@@ -2306,6 +2405,9 @@ class MainWindow(QMainWindow):
         self._load_seek_ms = None
         self.player.setSource(QUrl.fromLocalFile(self._video_path))
         self.timeline.set_media(info)  # builds the lanes and asks for assets
+        if project is not None:
+            self.timeline.load_project_state(project[2])
+            self._saved_state = self._project_snapshot()
         self.player.pause()
         self._sync_preview()
         self._update_time_label(0.0)
@@ -2314,6 +2416,11 @@ class MainWindow(QMainWindow):
             f"{info.fps:g} fps · {format_tc(info.duration, decimals=0)} · "
             f"{info.vcodec} · {len(info.audio)} audio track(s)"
         )
+        if project is not None and project[3]:
+            QMessageBox.warning(
+                self, "ffcut", "These files in the project are missing; their blocks "
+                "will not preview or render:\n\n" + "\n".join(project[3]),
+            )
         self._update_actions()
 
     # -------------------------------------------------------- preview video
@@ -3213,6 +3320,8 @@ class MainWindow(QMainWindow):
         blocks = len(self.timeline.clip_selection()) if has_media else 0
         self.act_split.setEnabled(has_media)
         self.act_add_text.setEnabled(has_media)
+        self.act_save_project.setEnabled(has_media)
+        self.act_save_project_as.setEnabled(has_media)
         self.act_group.setEnabled(blocks > 1)
         self.act_ungroup.setEnabled(has_media and self.timeline.has_grouped_selection())
         self.act_copy_blocks.setEnabled(blocks > 0)
@@ -3436,6 +3545,8 @@ class MainWindow(QMainWindow):
                 return (str(path), "video")
             if suffix in AUDIO_SUFFIXES:
                 return (str(path), "audio")
+            if suffix == PROJECT_SUFFIX:
+                return (str(path), "project")
         return None
 
     def handle_drag(self, event: QDragEnterEvent) -> None:
@@ -3443,7 +3554,7 @@ class MainWindow(QMainWindow):
         dropped = self._dropped_path(event.mimeData())
         # An audio file needs somewhere to hang its lane; with nothing loaded
         # there is no timeline to add it to.
-        if dropped and (dropped[1] == "video" or self.info is not None):
+        if dropped and (dropped[1] in ("video", "project") or self.info is not None):
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -3472,6 +3583,9 @@ class MainWindow(QMainWindow):
             return
         event.acceptProposedAction()
         path, kind = dropped
+        if kind == "project":
+            self.load_file(path)
+            return
         target = self._drop_target(event, source)
         if target is not None:
             self.place_on_lane(path, kind, target[1], target[0])

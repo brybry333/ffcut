@@ -2223,5 +2223,38 @@ class TestTextBlocks(_Case):
         self.assertEqual(self.w.titles_at(16.0), [])
 
 
+class TestProjectState(_Case):
+    def test_a_saved_edit_comes_back_exactly(self) -> None:
+        """Cuts, lifts, lanes, moved/split/grouped blocks, fades, text and the
+        mix all survive JSON and a fresh widget, with an empty history."""
+        self.w._set_marks(10.0, 20.0)
+        self.w.cut_selection()                      # a ripple cut
+        self.w.set_armed_lanes([1])
+        self.w._set_marks(30.0, 35.0)
+        self.w.cut_selection()                      # a lift on the sound only
+        self.w.set_armed_lanes(range(self.w.lane_count()))
+        self.split_at(50.0)
+        self.w.select_block(self.clips(0)[1])
+        self.w.set_block_fade(self.clips(0)[1], "in", 1.5)
+        title = self.w.add_title(5.0, "Saved: it's here")
+        self.w.set_title(title, x=0.25, color="#00ff00", font="Serif", bold=False)
+        sound = next(i for i, lane in enumerate(self.w._lanes) if lane.kind == "audio")
+        self.w._lanes[sound].header.mute.setChecked(True)
+        self.w._lanes[sound].header.slider.setValue(-6)
+        state = json.loads(json.dumps(self.w.project_state()))
+
+        other = TimelineWidget()
+        other.resize(WIDTH, HEIGHT)
+        self.addCleanup(other.deleteLater)
+        other.set_media(video())
+        other.load_project_state(state)
+        self.assertEqual(other.render_plan(), self.w.render_plan())
+        self.assertEqual(other.keep_segments_source(), self.w.keep_segments_source())
+        self.assertEqual(other.project_state(with_view=False), self.w.project_state(with_view=False))
+        self.assertFalse(other.can_undo(), "a loaded project starts a fresh history")
+        self.assertTrue(other._lanes[sound].muted)
+        self.assertEqual(other._lanes[sound].header.slider.value(), -6, "the header shows the saved mix")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
