@@ -397,29 +397,66 @@ class TestMoving(_Case):
         self.assertTrue(self.w.undo())
         self.assertEqual(self.starts(0), [0.0, 60.0], "one Ctrl+Z did not undo the drag")
 
-    def test_dragging_onto_another_lane_appends_to_its_end(self) -> None:
-        """The user's own rule: a block let go on another track goes on the END
-        of what is already there, which is the only landing that cannot
-        silently overlap it."""
+    def test_dragging_onto_another_lane_lands_where_it_is_let_go(self) -> None:
+        """Vegas: let go over another track and the block goes there, at the
+        time it was dropped -- the nearest free spot if something is in the way."""
         lane = self.w.add_video_lane()
         self.w.add_clip(lane, video("/tmp/b.mp4", 30.0), "place", with_audio=False)
-        self.assertEqual(self.starts(lane), [0.0])
         self.w.select_block(self.clips(0)[1])
-        self.w.ungroup_blocks()  # its sound cannot follow it onto a video lane
-        self.w.select_block(self.clips(0)[1])
+        self.w.ungroup_blocks()
+        self.w.select_block(self.clips(0)[1])  # 60-120, loose
         self.alt_drag(0, 90.0, 100.0, to_lane=lane)
         self.assertEqual(self.starts(0), [0.0], "it did not leave its old lane")
-        self.assertEqual(self.starts(lane), [0.0, 30.0], "it did not land on the end")
+        self.assertEqual(self.starts(lane), [0.0, 70.0], "it did not land where it was let go")
+        self.assertTrue(self.w.undo())
+        self.assertEqual(self.starts(0), [0.0, 60.0], "one Ctrl+Z puts it back")
+        self.assertEqual(self.starts(lane), [0.0])
 
-    def test_a_grouped_block_is_not_moved_across_lanes_alone(self) -> None:
-        """Its sound lives on an audio lane and cannot follow it onto a video
-        one, so moving the picture alone would break the sync the group is
-        there to keep.  The horizontal move still stands."""
+    def test_a_grouped_picture_moves_tracks_and_its_sound_stays_in_step(self) -> None:
+        """'Drag the grouped video from track 1 to track 2: the video goes down,
+        the audio stays on its track' -- and moves in time with it."""
         lane = self.w.add_video_lane()
-        self.w.select_block(self.clips(0)[1])  # picture + sound
-        self.alt_drag(0, 90.0, 100.0, to_lane=lane)
-        self.assertEqual(len(self.clips(0)), 2, "the picture left its sound behind")
-        self.assertEqual(self.starts(lane), [])
+        picture = self.clips(0)[1]
+        sound = next(c for c in self.clips(self.w.lane_count() - 1) if c.group == picture.group)
+        sound_lane = next(i for i in range(self.w.lane_count()) if sound in self.clips(i))
+        self.w.select_block(picture)  # picture + sound
+        self.alt_drag(0, 90.0, 95.0, to_lane=lane)
+        self.assertIn(picture, self.clips(lane), "the picture did not change tracks")
+        self.assertIn(sound, self.clips(sound_lane), "the sound left its own track")
+        self.assertAlmostEqual(picture.start, 65.0)
+        self.assertAlmostEqual(sound.start, picture.start, msg="out of sync")
+
+    def test_a_grouped_sound_dragged_straight_down_changes_audio_tracks(self) -> None:
+        """The same for audio, with a real pointer path: straight down, no
+        sideways motion at all, move events on the way."""
+        picture = self.clips(0)[1]
+        sound_lane = next(
+            i for i in range(self.w.lane_count())
+            if any(c.group == picture.group and c is not picture for c in self.clips(i))
+        )
+        sound = next(c for c in self.clips(sound_lane) if c.group == picture.group)
+        target = self.w.add_audio_lane()
+        self.w.select_block(sound)
+        alt = Qt.KeyboardModifier.AltModifier
+        self.press(90.0, sound_lane, alt)
+        self.move_to(90.0, target, alt)
+        self.release(90.0, target)
+        self.assertIn(sound, self.clips(target))
+        self.assertIn(picture, self.clips(0), "the picture stays on its track")
+        self.assertEqual((sound.start, picture.start), (60.0, 60.0), "nothing moved in time")
+
+    def test_no_room_on_the_target_keeps_the_group_home(self) -> None:
+        """When the only free spots on the target would pull the picture away
+        from its sound's possible positions, nothing changes tracks."""
+        lane = self.w.add_video_lane()
+        self.w.add_clip(lane, video("/tmp/long.mp4", 500.0), "place", with_audio=False)
+        picture = self.clips(0)[1]
+        self.w.select_block(picture)
+        hints: list[str] = []
+        self.w.blockHint.connect(hints.append)
+        self.alt_drag(0, 90.0, 90.5, to_lane=lane)
+        self.assertIn(picture, self.clips(0))
+        self.assertTrue(hints and "No room" in hints[-1])
 
     def test_a_block_is_not_dropped_onto_a_lane_of_the_other_kind(self) -> None:
         self.w.select_block(self.clips(0)[1])
@@ -1363,9 +1400,7 @@ class TestReviewFindings(_Case):
         self.assertEqual(self.w._move_limits(), (0.0, 0.0), "it is not wedged")
         self.alt_drag(lane, 60.0, 62.0, to_lane=target)
         self.assertEqual(len(self.clips(lane)), 2, "the wedged block never moved")
-        # An EMPTY destination keeps the block where it was: there is nothing
-        # to append to (see move_blocks_to_lane).
-        self.assertEqual(self.starts(target), [40.0])
+        self.assertEqual(self.starts(target), [42.0], "it lands where it was let go")
         self.assertTrue(self.w.can_undo())
         self.assertTrue(self.w.undo())
         self.assertEqual(len(self.clips(lane)), 3)
@@ -1523,10 +1558,8 @@ class TestReviewFindings(_Case):
         self.assertFalse(self.w.split_blocks())
         self.assertEqual(len(self.clips(0)), 1)
 
-    def test_a_group_on_one_lane_is_not_moved_across_lanes(self) -> None:
-        """Only a group spread over SEVERAL lanes was refused; one whose
-        members all sat on a single lane went across, though the README says
-        a grouped block has to be ungrouped first."""
+    def test_a_group_on_one_lane_moves_across_together(self) -> None:
+        """Two grouped blocks on one track go to the other track together, gap kept."""
         self.split_at(60.0)
         for index in (0, 1):  # break up the picture+sound pairs
             self.w.select_block(self.clips(0)[index])
@@ -1535,7 +1568,9 @@ class TestReviewFindings(_Case):
         self.w.select_block(self.clips(0)[1], toggle=True)
         self.assertTrue(self.w.group_blocks())
         target = self.w.add_video_lane()
-        self.assertFalse(self.w.can_move_to_lane(target))
+        self.alt_drag(0, 30.0, 30.0, to_lane=target)
+        self.assertEqual(self.starts(0), [])
+        self.assertEqual(self.starts(target), [0.0, 60.0])
 
     def test_wave_request_does_not_reach_across_a_splice(self) -> None:
         """The span END went back through `edited_to_source`, which answers a

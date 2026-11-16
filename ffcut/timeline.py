@@ -1259,6 +1259,7 @@ class TimelineWidget(QWidget):
 
         self._drag: str | None = None
         self._press_x: float = 0.0
+        self._press_y: float = 0.0
         self._press_view: Range = (0.0, 1.0)
         self._press_lane: int | None = None
         self._moved: bool = False
@@ -1270,6 +1271,11 @@ class TimelineWidget(QWidget):
         self._block_anchor: float = 0.0
         self._block_from: dict[int, float] = {}
         self._block_limits: Range = (0.0, 0.0)
+        #: Alt+drag across tracks: the lane the press grabbed, the selected
+        #: blocks on it (they are what changes lanes) and where they are now.
+        self._grab_lane: int = 0
+        self._movers: set[int] = set()
+        self._block_lane: int = 0
         #: The pointer passed the drag threshold.  NOT the same as
         #: ``_block_pushed``: a block wedged between two neighbours cannot move
         #: along its lane and so pushes no undo step, but it can still be
@@ -2192,48 +2198,100 @@ class TimelineWidget(QWidget):
         self._content_key = None
         self.update()
 
-    def move_blocks_to_lane(self, target: int) -> bool:
-        """Move the selection onto ``target``, appended after its content.
+    def _slide_range(self, pairs: list[tuple[int, Clip]]) -> Range:
+        """``(most negative, most positive)`` slide for blocks that stay on the
+        lanes in ``pairs``: they stop against their neighbours (no push, no
+        overlap).  From the starts recorded at the press, so it cannot creep."""
+        lo, hi = -1e18, 1e18
+        for index, clip in pairs:
+            start = self._block_from.get(clip.cid, clip.start)
+            end = start + clip.length
+            lo = max(lo, -start)
+            for other in self._lanes[index].clips:
+                if other.cid in self._selected:
+                    continue
+                if other.end <= start + 1e-9:
+                    lo = max(lo, other.end - start)
+                elif other.start >= end - 1e-9:
+                    hi = min(hi, other.start - end)
+        return (min(0.0, lo), max(0.0, hi))
 
-        Dropping a block on another track and having it land where the pointer
-        happened to be would silently overlap whatever is there, so it goes on
-        the END of that track instead — the same rule a file dropped on a lane
-        with content already follows.  An EMPTY target keeps the block where it
-        was, because there is nothing to append to.  Refused across kinds: a
-        video block has no meaning on an audio lane.
-        """
-        if not self.can_move_to_lane(target):
-            return False
-        blocks = self.selected_blocks()
-        destination = self._lanes[target]
-        source = self._lanes[{index for index, _ in blocks}.pop()]
-        base = min(clip.start for _, clip in blocks)
-        at = destination.end() if destination.clips else base
-        for _, clip in blocks:
-            source.clips.remove(clip)
-            clip.start = at + (clip.start - base)
-            destination.clips.append(clip)
-        destination.clips.sort(key=lambda c: c.start)
-        return True
+    def _cross_ranges(self, target: int) -> list[Range]:
+        """Slides that put the grabbed lane's blocks on lane ``target`` without
+        overlapping anything there, while the rest of their selection (a
+        group's sound, say) stays on its own tracks and keeps step in time.
 
-    def can_move_to_lane(self, target: int) -> bool:
-        """Would :meth:`move_blocks_to_lane` do anything?
-
-        Asked separately so a drag can decide whether to push an undo step
-        BEFORE it mutates anything — pushing first and then finding the move
-        refused would leave an undo step that undoes nothing.
+        Vegas: drag a grouped picture from video 1 to video 2 and it lands on
+        video 2 where you let go; its audio stays on its track, moved by the
+        same amount.  Every free gap on ``target`` is a candidate, so the block
+        can be placed past what is already there.
         """
         blocks = self.selected_blocks()
-        if not blocks or not 0 <= target < len(self._lanes):
-            return False
-        lanes = {index for index, _ in blocks}
-        if len(lanes) != 1 or target in lanes:
-            return False
-        # Any group, even one whose members all sit on this lane: the README
-        # promises "Ungroup first", and a group is what keeps blocks in step.
-        if any(clip.group for _, clip in blocks):
-            return False
-        return all(clip.kind == self._lanes[target].kind for _, clip in blocks)
+        stay = [(i, c) for i, c in blocks if c.cid not in self._movers]
+        movers = [c for _, c in blocks if c.cid in self._movers]
+        lo, hi = self._slide_range(stay) if stay else (-1e18, 1e18)
+        lo = max(lo, max(-self._block_from.get(c.cid, c.start) for c in movers))
+        free: list[Range] = [(lo, hi)] if lo <= hi else []
+        for clip in movers:
+            start = self._block_from.get(clip.cid, clip.start)
+            for other in self._lanes[target].clips:
+                if other.cid in self._selected:
+                    continue
+                # overlap while start+d < other.end and start+d+len > other.start
+                a, b = other.start - (start + clip.length), other.end - start
+                free = [
+                    piece for x, y in free
+                    for piece in ((x, min(y, a)), (max(x, b), y)) if piece[1] - piece[0] >= -1e-9
+                ]
+        return free
+
+    def _land_blocks(self, delta: float, target: int) -> tuple[int, float] | None:
+        """Where an Alt+drag puts the selection: ``(lane for the movers, slide)``.
+
+        The pointer's own lane when it is another of the grabbed kind and
+        there is room there, else the grabbed lane with the old neighbour stop.
+        """
+        kind = self._lanes[self._grab_lane].kind
+        if target != self._grab_lane and 0 <= target < len(self._lanes) \
+                and self._lanes[target].kind == kind:
+            ranges = self._cross_ranges(target)
+            if ranges:
+                best = min(
+                    (max(a, min(b, delta)) for a, b in ranges),
+                    key=lambda d: abs(d - delta),
+                )
+                # Nudged at most its own length: a free spot minutes away is not
+                # "where it was let go", and the group's sound would jump with it.
+                reach = max(c.length for _, c in self.selected_blocks() if c.cid in self._movers)
+                if abs(best - delta) <= reach:
+                    return target, best
+        lo, hi = self._slide_range(self.selected_blocks_at_press())
+        return self._grab_lane, max(lo, min(hi, delta))
+
+    def selected_blocks_at_press(self) -> list[tuple[int, Clip]]:
+        """The selection as it was laid out at the press (movers on the grabbed lane)."""
+        return [
+            (self._grab_lane if c.cid in self._movers else i, c)
+            for i, c in self.selected_blocks()
+        ]
+
+    def _place_blocks(self, lane: int, delta: float) -> None:
+        """Put the movers on ``lane`` and slide the whole selection by ``delta``."""
+        if lane != self._block_lane:
+            here, there = self._lanes[self._block_lane], self._lanes[lane]
+            for clip in [c for c in here.clips if c.cid in self._movers]:
+                here.clips.remove(clip)
+                there.clips.append(clip)
+            self._block_lane = lane
+        for _index, clip in self.selected_blocks():
+            clip.start = self._block_from.get(clip.cid, clip.start) + delta
+        for each in self._lanes:
+            each.clips.sort(key=lambda c: c.start)
+        self.model.set_duration(max(self.model.duration, self._total_duration()))
+        self._cells = None
+        self._gen_cuts += 1
+        self._content_key = None
+        self.update()
 
     def _group_shift(self, members: list[tuple[Lane, Clip]], at: float) -> float:
         """How far one pasted GROUP has to move right to fit, as one offset.
@@ -4166,6 +4224,7 @@ class TimelineWidget(QWidget):
             return
         self.setFocus(Qt.FocusReason.MouseFocusReason)
         self._press_x = x
+        self._press_y = y
         self._press_lane = self._lane_at(y)
         self._moved = False
         mods = event.modifiers()
@@ -4232,6 +4291,10 @@ class TimelineWidget(QWidget):
         self._block_anchor = self.model.edited_to_source(self._t_for_clamped(pos.x()))
         self._block_from = {c.cid: c.start for _, c in self.selected_blocks()}
         self._block_limits = self._move_limits()
+        self._grab_lane = self._block_lane = next(
+            (i for i, ln in enumerate(self._lanes) if clip in ln.clips), 0
+        )
+        self._movers = {c.cid for i, c in self.selected_blocks() if i == self._grab_lane}
 
     def _press_edge(self, pos: QPointF, clip: Clip, edge: str) -> None:
         """Alt+press on a block's left/right edge: arm a TRIM of its group."""
@@ -4329,21 +4392,13 @@ class TimelineWidget(QWidget):
 
         if self._drag == "block":
             if not self._block_moved:
-                if abs(x - self._press_x) < DRAG_THRESHOLD_PX:
+                # Either direction: a straight drag DOWN to another track is a move.
+                if max(abs(x - self._press_x), abs(event.position().y() - self._press_y)) < DRAG_THRESHOLD_PX:
                     return
                 self._block_moved = True
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
             self._moved = True
-            here = self.model.edited_to_source(self._t_for_clamped(x))
-            delta = self._snap_delta(here - self._block_anchor)
-            lo, hi = self._block_limits
-            if max(lo, min(hi, delta)) == 0.0 and not self._block_pushed:
-                # Wedged between its neighbours, or back where it started: no
-                # undo step for an edit that has not happened.  The drag stays
-                # armed, because letting go over ANOTHER lane is still a move.
-                return
-            self._push_block_edit()
-            self.move_blocks(delta)
+            self._drag_blocks_to(event.position())
             return
 
         if self._drag == "pan":
@@ -4396,38 +4451,46 @@ class TimelineWidget(QWidget):
             self._apply_playhead(self._t_for_clamped(event.position().x()), emit=True)
         self.update()
 
-    def _release_block(self, event: QMouseEvent) -> None:
-        """End an Alt+drag: land on another lane if that is where it was let go.
+    def _drag_blocks_to(self, pos: QPointF) -> None:
+        """One step of an Alt+drag: slide in time, and change lanes when the
+        pointer is over another track of the same kind (see _land_blocks)."""
+        here = self.model.edited_to_source(self._t_for_clamped(pos.x()))
+        delta = self._snap_delta(here - self._block_anchor)
+        target = self._lane_at(pos.y())
+        lane, slide = self._land_blocks(delta, self._grab_lane if target is None else target)
+        if lane == self._grab_lane and slide == 0.0 and not self._block_pushed:
+            # Wedged between its neighbours, or back where it started: no undo
+            # step for an edit that has not happened.
+            return
+        self._push_block_edit()
+        self._place_blocks(lane, slide)
 
-        A block let go over a DIFFERENT track of the same kind is appended to
-        the end of that track's content, which is the user's own rule and the
-        only landing that cannot silently overlap what is already there.
+    def _release_block(self, event: QMouseEvent) -> None:
+        """End an Alt+drag.  The lane change already happened live (Vegas-style,
+        see :meth:`_cross_ranges`); this settles the length and says why a
+        drop over another track did not take.
         """
         self.setCursor(Qt.CursorShape.OpenHandCursor)
+        pos = event.position()
+        if max(abs(pos.x() - self._press_x), abs(pos.y() - self._press_y)) >= DRAG_THRESHOLD_PX:
+            self._block_moved = True  # let go somewhere else, even with no move events between
         if not self._block_moved:
             return  # a click, not a drag: the selection it made is the result
-        target = self._lane_at(event.position().y())
-        blocks = self.selected_blocks()
-        lanes = {index for index, _ in blocks}
-        if blocks and target is not None and self.can_move_to_lane(target):
-            self._push_block_edit()  # before it mutates, and only if it will
-        # ``blocks`` can be EMPTY here: Escape or Delete during the drag clears
-        # the selection while the button is still down.  Reading a "first
-        # block" then is an unhandled StopIteration inside a reimplemented
-        # virtual, which PyQt turns into qFatal — it aborted the process.
-        if blocks and target is not None and target not in lanes:
-            if self.move_blocks_to_lane(target):
+        # ``selected_blocks`` can be EMPTY here: Escape or Delete during the
+        # drag clears the selection while the button is still down.
+        if self.selected_blocks():
+            self._drag_blocks_to(event.position())  # the release point counts
+            target = self._lane_at(event.position().y())
+            kind = self._lanes[self._grab_lane].kind
+            if target is not None and target != self._block_lane:
+                self.blockHint.emit(
+                    f"A {kind} block cannot go on a {self.lane_kind(target)} track."
+                    if self.lane_kind(target) != kind
+                    else f"No room on track {target + 1} there"
+                    + (" that keeps its group in step." if len(self._movers) < len(self._selected) else ".")
+                )
+            elif self._block_lane != self._grab_lane:
                 self._announce_blocks()
-            elif any(clip.group for _, clip in blocks):
-                self.blockHint.emit(
-                    "Grouped blocks stay on their own tracks — right-click ▸ "
-                    "Ungroup to move one of them across."
-                )
-            elif len(lanes) == 1:
-                self.blockHint.emit(
-                    f"A {blocks[0][1].kind} block cannot "
-                    f"go on a {self.lane_kind(target)} track."
-                )
         pushed = self._block_pushed
         # A drag is in TIMELINE time and jumps a whole cut at a splice, so the
         # neighbour clamp can park a block entirely inside a cut: gone from

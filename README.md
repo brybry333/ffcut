@@ -64,7 +64,7 @@ backend, and `ffmpeg`/`ffprobe` on `PATH`. Nothing from pip.
    | Ctrl+click (with a block already selected) | add it to / remove it from the selection — Ctrl+click with nothing selected is still a plain seek |
    | Ctrl+Alt+click | the same, and it always means the block |
    | Alt+drag | slide it along its lane — it snaps to neighbours, 0:00 and the playhead, and stops against a neighbour rather than overlapping it |
-   | Alt+drag to another track | appended to the END of that track's content; refused across kinds, and for a grouped block (Ungroup first) |
+   | Alt+drag to another track | moves it onto that track where you let go, Vegas-style — onto the nearest free spot there. A grouped block's partners (its sound) stay on their own tracks and move with it in time, so they stay in sync. Refused across kinds |
    | Double-click | reset the selection to the block under the cursor, and mark the section of it you clicked |
    | Alt+drag its LEFT or RIGHT edge | **trim** it — dragging out restores material a split or an earlier trim cut off, dragging in gives it back. Bounded by the file's own ends, by the neighbouring block and by a 50 ms minimum. The left edge moves the in-point and the start together, so the picture already in the block does not shift |
    | Alt+drag its TOP-LEFT or TOP-RIGHT corner | **fade in / fade out**, 0 to the block's whole length, painted as a shaded wedge |
