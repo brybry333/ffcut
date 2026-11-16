@@ -107,6 +107,7 @@ __all__ = [
     "PreviewPlan",
     "PreviewVideo",
     "TimelineWidget",
+    "Title",
     "format_tc",
 ]
 
@@ -128,6 +129,8 @@ PAN_FRACTION: float = 0.08
 RIGHT_ROOM_FRAC: float = 0.2
 RIGHT_ROOM_MIN: float = 10.0
 """Empty room the view keeps past the edit's end: a fifth of it, never under 10 s."""
+SCROLL_ROOM_MIN: float = 300.0
+"""Scrollable room past the end: the edit's own length again, never under 5 minutes."""
 REQ_DEBOUNCE_MS: int = 150
 
 # --- painting metrics -------------------------------------------------------
@@ -753,6 +756,8 @@ class Title:
     y: float = 0.85
     size: float = 0.08
     color: str = "#ffffff"
+    font: str = "Sans"
+    bold: bool = True
 
 
 #: A text block has no file, so its "file" is a long virtual one with the block
@@ -1346,7 +1351,7 @@ class TimelineWidget(QWidget):
             self.weld_group([picture, *self._embedded_audio(info, info.audio, 0.0)])
         self.model.reset(info.duration if info else 0.0)
         self._lanes_changed(keep_all=True)
-        self._set_view(0.0, self._view_total())
+        self._set_view(0.0, self._fit_total())
         self._asked = None
         self._req.start()  # always ask, even if the view happened not to change
         self.selectionChanged.emit(None)
@@ -2145,8 +2150,6 @@ class TimelineWidget(QWidget):
         forbid the honest case to prevent a harmless one.
         """
         value = max(0.0, min(float(seconds), clip.length))
-        if clip.title is not None:
-            value = 0.0  # shortcut: titles do not fade, add drawtext alpha if wanted
         if which == "in":
             clip.fade_in = value
         else:
@@ -2494,11 +2497,11 @@ class TimelineWidget(QWidget):
         # bed past the end of the video hides the very thing just added.
         was_fit = (
             self._view[0] <= 1e-6
-            and self._view[1] >= self._view_total() - 1e-6
+            and self._view[1] >= self._fit_total() - 1e-6
         )
         self._lanes_changed(keep_all)
         if was_fit:
-            self._view = (0.0, self._view_total())
+            self._view = (0.0, self._fit_total())
         self._after_model_change()
         self.cutsChanged.emit()
 
@@ -2628,7 +2631,8 @@ class TimelineWidget(QWidget):
             if lane.kind == "video":
                 titles = [c for c in lane.clips if c.title is not None]
                 texts += [
-                    TextClip(c.start, c.end, t.text, t.x, t.y, t.size, t.color)
+                    TextClip(c.start, c.end, t.text, t.x, t.y, t.size, t.color,
+                             t.font, t.bold, c.fade_in, c.fade_out)
                     for c in titles if (t := c.title) is not None
                 ]
                 footage = [c for c in lane.clips if c.title is None]
@@ -3054,13 +3058,19 @@ class TimelineWidget(QWidget):
         self._set_view(start, end)
 
     def zoom_to_fit(self) -> None:
-        self._set_view(0.0, self._view_total())
+        self._set_view(0.0, self._fit_total())
 
-    def _view_total(self) -> float:
-        """The edit plus empty room past its end, as in Vegas/Premiere, so a block
-        can be dragged (or a file dropped) beyond the last one."""
+    def _fit_total(self) -> float:
+        """What "zoom to fit" shows: the edit plus a little room past its end."""
         total = self.model.edited_duration()
         return total + max(RIGHT_ROOM_MIN, total * RIGHT_ROOM_FRAC) if total > 0.0 else 0.0
+
+    def _view_total(self) -> float:
+        """How far the view may scroll or zoom out: well past the edit, as in
+        Vegas/Premiere, so a block can be dragged or a file dropped beyond the
+        last one and the scrollbar always has somewhere to go."""
+        total = self.model.edited_duration()
+        return total + max(SCROLL_ROOM_MIN, total) if total > 0.0 else 0.0
 
     def _max_span(self) -> float:
         return max(MIN_SPAN, self._view_total())
@@ -4236,7 +4246,7 @@ class TimelineWidget(QWidget):
         # right of the strip.  Remember the answer from BEFORE the drag instead.
         self._edge_refit = (
             self._view[0] <= 1e-6
-            and self._view[1] >= self._view_total() - 1e-6
+            and self._view[1] >= self._fit_total() - 1e-6
         )
         self._edge_anchor = self._source_for_x(pos.x())
         self._edge_from = {

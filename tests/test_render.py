@@ -292,6 +292,25 @@ class TestTitles(unittest.TestCase):
         self.assertTrue(graph.endswith("[vout]"))
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required")
+    def test_a_fading_title_runs_in_ffmpeg_and_ramps(self) -> None:
+        """alpha ramps 0 -> 1 over the fade-in: measured on real frames."""
+        title = TextClip(0.0, 4.0, "FADE", 0.5, 0.5, 0.3, "#ffffff", fade_in=2.0)
+        chain = render_mod._text_filters([title], [Segment(0.0, 4.0)])
+
+        def lit(t: float) -> int:
+            out = subprocess.run(
+                ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=black:s=320x180:r=10:d=4",
+                 "-vf", chain.lstrip(","), "-ss", str(t), "-frames:v", "1",
+                 "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                capture_output=True, check=True,
+            ).stdout
+            return max(out)
+
+        self.assertLess(lit(0.0), 40)
+        self.assertTrue(80 < lit(1.0) < 200, "half way up")
+        self.assertGreater(lit(3.0), 240)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required")
     def test_quoting_survives_ffmpeg(self) -> None:
         """Quotes, colons, backslashes, %{} and newlines draw exactly as a textfile does."""
         nasty = "It's 100% \"fun\": a\\b, c;d [x] {y} %{pts}\nline two = ok"

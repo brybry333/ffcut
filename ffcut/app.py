@@ -118,14 +118,18 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QFrame,
     QGridLayout,
+    QCheckBox,
+    QColorDialog,
+    QDoubleSpinBox,
+    QFontComboBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
     QProgressBar,
+    QPlainTextEdit,
     QPushButton,
     QScrollBar,
     QSizePolicy,
@@ -159,6 +163,7 @@ from .timeline import (
     PreviewPlan,
     PreviewVideo,
     TimelineWidget,
+    Title,
     format_tc,
 )
 
@@ -549,6 +554,80 @@ class _PreviewSource(NamedTuple):
         return None
 
 
+class TextDialog(QDialog):
+    """Add / edit a text block: the words, font, colour, size and fades.
+
+    Position is not here: drag the text on the paused preview for that.
+    """
+
+    def __init__(self, title: object, fade_in: float, fade_out: float, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Text")
+        self.setMinimumWidth(380)
+        form = QFormLayout(self)
+        self.text = QPlainTextEdit(title.text)  # type: ignore[attr-defined]
+        self.text.setFixedHeight(90)
+        form.addRow("Text", self.text)
+        self.font_box = QFontComboBox()
+        self.font_box.setCurrentFont(QFont(title.font))  # type: ignore[attr-defined]
+        form.addRow("Font", self.font_box)
+        self.bold = QCheckBox("Bold")
+        self.bold.setChecked(bool(title.bold))  # type: ignore[attr-defined]
+        form.addRow("", self.bold)
+        self.color = QColor(title.color)  # type: ignore[attr-defined]
+        self.color_button = QPushButton()
+        self.color_button.clicked.connect(self._pick_color)
+        self._show_color()
+        form.addRow("Colour", self.color_button)
+        self.size = _spin(1, 50, round(title.size * 100), suffix=" % of frame height",  # type: ignore[attr-defined]
+                          tip="Or drag the square at the text's corner on the paused preview.")
+        form.addRow("Size", self.size)
+        self.fade_in = self._seconds(fade_in)
+        self.fade_out = self._seconds(fade_out)
+        form.addRow("Fade in", self.fade_in)
+        form.addRow("Fade out", self.fade_out)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    @staticmethod
+    def _seconds(value: float) -> QDoubleSpinBox:
+        box = QDoubleSpinBox()
+        box.setRange(0.0, 600.0)
+        box.setDecimals(2)
+        box.setSingleStep(0.25)
+        box.setSuffix(" s")
+        box.setValue(value)
+        return box
+
+    def _show_color(self) -> None:
+        self.color_button.setText(self.color.name())
+        self.color_button.setStyleSheet(
+            f"background: {self.color.name()}; color: "
+            f"{'black' if self.color.lightness() > 128 else 'white'};"
+        )
+
+    def _pick_color(self) -> None:
+        picked = QColorDialog.getColor(self.color, self, "Text colour")
+        if picked.isValid():
+            self.color = picked
+            self._show_color()
+
+    def values(self) -> dict[str, object]:
+        return {
+            "text": self.text.toPlainText(),
+            "font": self.font_box.currentFont().family(),
+            "bold": self.bold.isChecked(),
+            "color": self.color.name(),
+            "size": self.size.value() / 100.0,
+            "fade_in": self.fade_in.value(),
+            "fade_out": self.fade_out.value(),
+        }
+
+
 class TitleStage(QWidget):
     """The paused frame as a still, with the text blocks on it to drag and size.
 
@@ -573,6 +652,7 @@ class TitleStage(QWidget):
         self.frame_size = QSize(16, 9)
         self.titles: list[object] = []  # timeline Clips carrying .title
         self.selected: frozenset[int] = frozenset()
+        self.time = 0.0  # TIMELINE seconds at the playhead, for the fades
         self._drag: tuple[str, int, QPointF, float, float, float] | None = None
         self.setMouseTracking(True)
 
@@ -583,16 +663,25 @@ class TitleStage(QWidget):
         w, h = fw * scale, fh * scale
         return QRectF((self.width() - w) / 2, (self.height() - h) / 2, w, h)
 
-    def _font(self, size: float) -> QFont:
-        font = QFont("Sans")
-        font.setBold(True)
-        font.setPixelSize(max(1, round(size * self.frame_rect().height())))
+    def _font(self, title: object) -> QFont:
+        font = QFont(title.font)  # type: ignore[attr-defined]
+        font.setBold(bool(title.bold))  # type: ignore[attr-defined]
+        font.setPixelSize(max(1, round(title.size * self.frame_rect().height())))  # type: ignore[attr-defined]
         return font
+
+    def opacity(self, clip: object) -> float:
+        """The render's alpha ramp at the playhead (drawtext ``alpha``)."""
+        ramps = [1.0]
+        if clip.fade_in > 0:  # type: ignore[attr-defined]
+            ramps.append((self.time - clip.start) / clip.fade_in)  # type: ignore[attr-defined]
+        if clip.fade_out > 0:  # type: ignore[attr-defined]
+            ramps.append((clip.end - self.time) / clip.fade_out)  # type: ignore[attr-defined]
+        return max(0.0, min(ramps))
 
     def text_rect(self, title: object) -> QRectF:
         t = title.title  # type: ignore[attr-defined]
         frame = self.frame_rect()
-        box = QFontMetricsF(self._font(t.size)).boundingRect(
+        box = QFontMetricsF(self._font(t)).boundingRect(
             QRectF(0, 0, 1e6, 1e6), int(Qt.AlignmentFlag.AlignHCenter), t.text
         )
         cx, cy = frame.left() + t.x * frame.width(), frame.top() + t.y * frame.height()
@@ -611,12 +700,14 @@ class TitleStage(QWidget):
         for clip in self.titles:
             t = clip.title  # type: ignore[attr-defined]
             rect = self.text_rect(clip)
-            painter.setFont(self._font(t.size))
+            painter.setFont(self._font(t))
+            painter.setOpacity(max(0.15, self.opacity(clip)))  # faded out: still grabbable
             flags = int(Qt.AlignmentFlag.AlignHCenter)
             painter.setPen(QColor(0, 0, 0, 153))  # the render's shadowcolor=black@0.6
             painter.drawText(rect.translated(2, 2), flags, t.text)
             painter.setPen(QColor(t.color))
             painter.drawText(rect, flags, t.text)
+            painter.setOpacity(1.0)
             if clip.cid in self.selected:  # type: ignore[attr-defined]
                 painter.setPen(QPen(QColor("#4aa3df"), 1.0, Qt.PenStyle.DashLine))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -2256,6 +2347,7 @@ class MainWindow(QMainWindow):
         )
         if titles:
             self.stage.titles = titles
+            self.stage.time = self.timeline.edited_to_source(self.timeline.playhead())
             self.stage.selected = self.timeline.clip_selection()
             if self.info is not None:
                 self.stage.frame_size = QSize(self.info.width, self.info.height)
@@ -2293,14 +2385,30 @@ class MainWindow(QMainWindow):
                 return clip
         return None
 
+    def _text_dialog(self, title: object, fade_in: float, fade_out: float) -> dict | None:
+        """Run the text dialog; the chosen values, or None when cancelled/empty."""
+        dialog = TextDialog(title, fade_in, fade_out, self)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        values = dialog.values()
+        dialog.deleteLater()
+        return values if accepted and str(values["text"]).strip() else None
+
+    def _apply_text(self, clip: object, values: dict) -> None:
+        """Fades first (they emit nothing), then the title, which re-plans."""
+        fields = dict(values)
+        self.timeline.set_fade(clip, "in", float(fields.pop("fade_in")))  # type: ignore[arg-type]
+        self.timeline.set_fade(clip, "out", float(fields.pop("fade_out")))  # type: ignore[arg-type]
+        self.timeline.set_title(clip, undo=False, **fields)  # type: ignore[arg-type]
+
     def add_text(self) -> None:
         if self.info is None:
             return
-        text, ok = QInputDialog.getMultiLineText(self, "Add text", "Text:", "Text")
-        if not ok or not text.strip():
+        values = self._text_dialog(Title("Text"), 0.0, 0.0)
+        if values is None:
             return
         at = self.timeline.edited_to_source(self.timeline.playhead())
-        clip = self.timeline.add_title(at, text)
+        clip = self.timeline.add_title(at, str(values["text"]))
+        self._apply_text(clip, values)  # same undo step as the add
         self.timeline.select_block(clip)
         self._set_playing(False)
         self._status("Text added. Pause on it to drag it on the preview; "
@@ -2316,9 +2424,10 @@ class MainWindow(QMainWindow):
         clip = self.timeline.find_clip(cid)
         if clip is None or clip.title is None:
             return
-        text, ok = QInputDialog.getMultiLineText(self, "Edit text", "Text:", clip.title.text)
-        if ok and text.strip():
-            self.timeline.set_title(clip, text=text)
+        values = self._text_dialog(clip.title, clip.fade_in, clip.fade_out)
+        if values is not None:
+            self.timeline.push_undo()
+            self._apply_text(clip, values)
 
     def _on_stage_picked(self, cid: int) -> None:
         clip = self.timeline.find_clip(cid)

@@ -52,7 +52,7 @@ __all__ = [
     "VideoLane",
     "build_command",
     "build_filter_graph",
-    "default_font_file",
+    "font_file",
     "default_vaapi_device",
     "encoder_flags",
     "hole_enable",
@@ -169,11 +169,12 @@ def default_vaapi_device(sys_drm: str = "/sys/class/drm") -> str:
 
 
 @functools.lru_cache(maxsize=None)
-def default_font_file() -> str:
-    """The bold sans fontconfig picks (what Qt's preview uses too); "" if none."""
+def font_file(family: str = "Sans", bold: bool = True) -> str:
+    """The file fontconfig picks for ``family`` -- the same lookup Qt's preview
+    makes, so both draw with one font; "" if fontconfig has nothing."""
     try:
         out = subprocess.run(
-            ["fc-match", "-f", "%{file}", "sans-serif:bold"],
+            ["fc-match", "-f", "%{file}", f"{family}:{'bold' if bold else 'regular'}"],
             capture_output=True, text=True, timeout=5,
         ).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
@@ -311,6 +312,10 @@ class TextClip:
     y: float = 0.85
     size: float = 0.08
     color: str = "#ffffff"
+    font: str = "Sans"
+    bold: bool = True
+    fade_in: float = 0.0
+    fade_out: float = 0.0
 
 
 @dataclass
@@ -393,15 +398,22 @@ def _text_filters(texts: list[TextClip], segs: list[Segment]) -> str:
     """``,drawtext=…`` per title, after scale so it is drawn at output size.
 
     Each one is enabled only over the output ranges its block survives in, so a
-    cut through a title removes that part of it like any other footage.
+    cut through a title removes that part of it like any other footage.  Fades
+    ramp ``alpha`` from the first surviving instant and down to the last one.
     """
-    font = default_font_file()
     parts: list[str] = []
     for t in texts:
         ranges = _output_ranges(t.start, t.end, segs)
         if not ranges or not t.text.strip():
             continue
+        font = font_file(t.font, t.bold)
         enable = "+".join(f"between(t,{_fmt(a)},{_fmt(b)})" for a, b in ranges)
+        ramps = []
+        if t.fade_in > EPS:
+            ramps.append(f"(t-{_fmt(ranges[0][0])})/{_fmt(t.fade_in)}")
+        if t.fade_out > EPS:
+            ramps.append(f"({_fmt(ranges[-1][1])}-t)/{_fmt(t.fade_out)}")
+        alpha = f":alpha={_quote('clip(min(' + ','.join(['1', *ramps]) + '),0,1)')}" if ramps else ""
         parts.append(
             "drawtext="
             + (f"fontfile={_quote(font)}:" if font else "")
@@ -409,6 +421,7 @@ def _text_filters(texts: list[TextClip], segs: list[Segment]) -> str:
             + f":fontcolor={_quote(t.color)}:fontsize=h*{_fmt(t.size)}"
             + f":x=w*{_fmt(t.x)}-text_w/2:y=h*{_fmt(t.y)}-text_h/2"
             + ":shadowx=2:shadowy=2:shadowcolor=black@0.6"
+            + alpha
             + f":enable='{enable}'"
         )
     return "".join("," + part for part in parts)

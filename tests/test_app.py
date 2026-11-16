@@ -45,7 +45,6 @@ from PyQt6.QtMultimedia import QMediaPlayer  # noqa: E402
 from PyQt6.QtMultimediaWidgets import QVideoWidget  # noqa: E402
 from PyQt6.QtTest import QTest  # noqa: E402
 from PyQt6.QtWidgets import (  # noqa: E402
-    QInputDialog,
     QApplication,
     QDialog,
     QFileDialog,
@@ -2233,17 +2232,23 @@ class TestPreviewCopies(_OwnConfig, WindowCase):
 class TestText(_OwnConfig, WindowCase):
     def test_add_text_shows_on_the_paused_stage_and_drags_in_one_undo_step(self) -> None:
         win = self.loaded()
-        orig = QInputDialog.getMultiLineText
-        QInputDialog.getMultiLineText = staticmethod(lambda *a, **k: ("Hello", True))  # type: ignore[method-assign]
-        self.addCleanup(setattr, QInputDialog, "getMultiLineText", orig)
+        answers = {"text": "Hello", "font": "Serif", "bold": False, "color": "#ffcc00",
+                   "size": 0.1, "fade_in": 1.0, "fade_out": 0.5}
+        win._text_dialog = lambda *a: dict(answers)  # type: ignore[method-assign]
         win.act_add_text.trigger()
-        self.assertEqual([t.text for t in win.timeline.render_plan().texts], ["Hello"])
+        text = win.timeline.render_plan().texts[0]
+        self.assertEqual((text.text, text.font, text.bold, text.color, text.size, text.fade_in, text.fade_out),
+                         ("Hello", "Serif", False, "#ffcc00", 0.1, 1.0, 0.5))
+        win.timeline.undo()
+        self.assertEqual(win.timeline.render_plan().texts, [], "add + its settings = one undo step")
+        win.timeline.redo()
         self.assertFalse(win.stage.isHidden(), "paused on a text block: the still + text")
         self.assertTrue(win.video.isHidden())
 
         win.stage.resize(640, 360)
         win.stage.frame_size = QSize(640, 360)
         clip = win.stage.titles[0]
+        win.timeline.set_fade(clip, "in", 0.0)  # full opacity for the drag
         before = win.timeline.model.can_undo
         centre = win.stage.text_rect(clip).center()
         QTest.mousePress(win.stage, Qt.MouseButton.LeftButton, pos=centre.toPoint())

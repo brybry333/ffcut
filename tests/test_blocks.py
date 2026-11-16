@@ -2172,10 +2172,12 @@ class TestTextBlocks(_Case):
         texts = self.w.render_plan().texts
         self.assertEqual([(t.start, t.end, t.text) for t in texts], [(10.0, 12.0, "Hi"), (12.0, 15.0, "Hi")])
 
-    def test_a_title_has_no_fades_and_stretches_both_ways(self) -> None:
+    def test_a_title_fades_and_stretches_both_ways(self) -> None:
         clip = self.w.add_title(10.0, "Hi")
         self.w.set_fade(clip, "in", 2.0)
-        self.assertEqual(clip.fade_in, 0.0, "the render does not fade titles")
+        self.w.set_title(clip, font="Serif", bold=False, color="#ff0000")
+        text = self.w.render_plan().texts[0]
+        self.assertEqual((text.fade_in, text.font, text.bold, text.color), (2.0, "Serif", False, "#ff0000"))
         self.w.trim_block(clip, "left", -8.0)
         self.w.trim_block(clip, "right", 20.0)
         self.assertEqual((clip.start, clip.end), (2.0, 35.0))

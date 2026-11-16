@@ -922,7 +922,7 @@ class TestZoomAndPan(_WidgetCase):
         for _ in range(200):
             self.wheel(500.0, 1)
         self.assertEqual(self.w.view_range(), (0.0, 100.0))
-        for _ in range(500):
+        for _ in range(1500):
             self.wheel(500.0, -1)
         # Past the edit's end by the room on the right, and no further.
         self.assertAlmostEqual(self.w.view_range()[1], self.w._view_total(), places=6)
@@ -983,7 +983,7 @@ class TestZoomAndPan(_WidgetCase):
         self.key(Qt.Key.Key_Plus)
         self.assertLess(self.w.view_range()[1] - self.w.view_range()[0], 2780.0)
         self.key(Qt.Key.Key_0)
-        self.assertEqual(self.w.view_range(), (0.0, self.w._view_total()))
+        self.assertEqual(self.w.view_range(), (0.0, self.w._fit_total()))
 
 
 class TestLanesAndMix(_WidgetCase):
@@ -1875,11 +1875,18 @@ class TestScrollbar(_WidgetCase):
         self.assertEqual([h.geometry() for h in self.w._headers], before)
         self.assertEqual(self.bar().geometry().left(), GUTTER_W)
 
-    def test_disabled_when_the_whole_edit_fits(self) -> None:
+    def test_scrollable_right_after_opening(self) -> None:
+        """'I want to scroll as far as it says I can when I first open it':
+        the fitted view leaves the bar a real handle to drag past the end."""
         self.w.zoom_to_fit()
-        self.assertFalse(self.bar().isEnabled())
-        self.w.set_view_range(0.0, 100.0)
-        self.assertTrue(self.bar().isEnabled())
+        bar = self.bar()
+        self.assertTrue(bar.isEnabled())
+        self.assertGreater(bar.maximum(), 0)
+        bar.setValue(bar.maximum())
+        self.assertAlmostEqual(self.w.view_range()[1], self.w._view_total(), places=3)
+        self.assertGreater(self.w.view_range()[1], self.w.edited_duration() * 1.5)
+        self.w.set_view_range(0.0, 1e9)  # zoomed all the way out: nothing left to scroll
+        self.assertFalse(bar.isEnabled())
 
     def test_zooming_rescales_it(self) -> None:
         self.w.set_view_range(0.0, 100.0)

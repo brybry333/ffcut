@@ -94,14 +94,17 @@ backend, and `ffmpeg`/`ffprobe` on `PATH`. Nothing from pip.
    is there.
 8. **Text** — Edit ▸ Add Text… (Ctrl+T) puts a text block at the playhead on a
    video track of its own (5 s; Alt+drag its edges to stretch it, Alt+drag it
-   to move it, S to split it, right-click ▸ Edit text…). Paused over it, the
+   to move it, S to split it, right-click ▸ Edit text…). The text dialog sets
+   the words, font, bold, colour, size and fade in/out (the block's corner
+   handles set the fades too, as on any block). Paused over it, the
    preview shows that frame as a still with the text on it: drag the text to
    move it, drag the square at its corner to resize it, double-click it to
    edit it. Position and size are fractions of the frame, so the render
    (`drawtext`, Noto Sans Bold, after scaling) puts it in the same place at any
    resolution. While playing, the preview shows the video without the text
    (Qt's video widget is a native window nothing can be painted over); the
-   render always has it. Text blocks do not fade.
+   render always has it. Fades ramp the text's opacity (`drawtext` `alpha`),
+   and the paused preview shows that opacity at the playhead.
 9. **Lift vs ripple** — with every lane armed (the default) Delete ripples the
    whole edit. Click a lane header to arm that lane alone, Ctrl+click to add or
    remove one, drag inside an unarmed lane to re-arm to it; Delete then *lifts*
@@ -111,9 +114,10 @@ backend, and `ffmpeg`/`ffprobe` on `PATH`. Nothing from pip.
    Render Selection… (Ctrl+Shift+R) is enabled only when a selection exists and
    renders just that range, with any cuts inside it still honoured.
 
-The timeline view runs a fifth past the end of the edit (at least 10 s), as in
-Vegas or Premiere, so there is always room to drag a block or drop a file
-beyond the last one.
+Opening a file shows the edit plus a fifth (at least 10 s) of room past its end,
+and the timeline scrolls and zooms out much further than that — the edit's own
+length again, at least 5 minutes — as in Vegas or Premiere, so there is always
+room to drag a block or drop a file beyond the last one.
 
 The preview plays the whole timeline, not just the loaded file: the timeline
 hands it the picture as a list of RUNS (contiguous stretches of one file, in
